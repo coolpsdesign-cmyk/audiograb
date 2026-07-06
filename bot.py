@@ -82,6 +82,35 @@ YOUTUBE_REGEX = re.compile(
 MAX_FILESIZE_MB = 50
 
 
+def _resolve_cookie_file() -> Optional[Path]:
+    """
+    Return a writable cookies file path for yt-dlp, or None if unavailable.
+    Supports Railway-style YOUTUBE_COOKIES_TEXT (paste full cookies.txt content).
+    """
+    cookies_text = os.environ.get("YOUTUBE_COOKIES_TEXT", "").strip()
+    if cookies_text:
+        writable_cookie_path = Path("/tmp/cookies.txt")
+        writable_cookie_path.write_text(cookies_text + "\n", encoding="utf-8")
+        logger.info("Using YouTube cookies from YOUTUBE_COOKIES_TEXT (%d bytes)", len(cookies_text))
+        return writable_cookie_path
+
+    cookie_candidates = []
+    env_cookie = os.environ.get("YOUTUBE_COOKIES_PATH")
+    if env_cookie:
+        cookie_candidates.append(Path(env_cookie))
+    cookie_candidates.append(Path(__file__).parent / "cookies.txt")
+    cookie_candidates.append(Path("/etc/secrets/cookies.txt"))
+
+    secret_cookie_path = next((p for p in cookie_candidates if p.exists()), None)
+    if secret_cookie_path is None:
+        return None
+
+    writable_cookie_path = Path("/tmp/cookies.txt")
+    shutil.copyfile(str(secret_cookie_path), writable_cookie_path)
+    logger.info("Using YouTube cookies from %s", secret_cookie_path)
+    return writable_cookie_path
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Send me a YouTube video or Shorts link and I'll reply with the audio as an MP3.\n\n"
@@ -130,21 +159,9 @@ def download_audio(url: str, out_dir: Path):
         },
     }
 
-    # YouTube blocks most cloud/datacenter IPs. A browser cookies file fixes this.
-    # Checked in order: env var → cookies.txt next to bot.py → Render secret path.
-    cookie_candidates = []
-    env_cookie = os.environ.get("YOUTUBE_COOKIES_PATH")
-    if env_cookie:
-        cookie_candidates.append(Path(env_cookie))
-    cookie_candidates.append(Path(__file__).parent / "cookies.txt")
-    cookie_candidates.append(Path("/etc/secrets/cookies.txt"))
-
-    secret_cookie_path = next((p for p in cookie_candidates if p.exists()), None)
-    if secret_cookie_path is not None:
-        writable_cookie_path = Path("/tmp/cookies.txt")
-        shutil.copyfile(str(secret_cookie_path), writable_cookie_path)
-        ydl_opts["cookiefile"] = str(writable_cookie_path)
-        logger.info("Using YouTube cookies from %s", secret_cookie_path)
+    cookie_file = _resolve_cookie_file()
+    if cookie_file is not None:
+        ydl_opts["cookiefile"] = str(cookie_file)
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
@@ -370,20 +387,14 @@ def main():
 
     threading.Thread(target=_start_keepalive_server, daemon=True).start()
 
-    cookie_candidates = []
-    env_cookie = os.environ.get("YOUTUBE_COOKIES_PATH")
-    if env_cookie:
-        cookie_candidates.append(Path(env_cookie))
-    cookie_candidates.append(Path(__file__).parent / "cookies.txt")
-    cookie_candidates.append(Path("/etc/secrets/cookies.txt"))
-    secret_cookie_path = next((p for p in cookie_candidates if p.exists()), None)
-    if secret_cookie_path is not None:
-        size = secret_cookie_path.stat().st_size
-        logger.info("Cookie file FOUND at %s (%d bytes)", secret_cookie_path, size)
+    cookie_file = _resolve_cookie_file()
+    if cookie_file is not None:
+        size = cookie_file.stat().st_size
+        logger.info("Cookie file ready at %s (%d bytes)", cookie_file, size)
     else:
         logger.warning(
             "Cookie file NOT FOUND — YouTube will likely block downloads on cloud hosts. "
-            "Add cookies.txt next to bot.py and redeploy."
+            "Set YOUTUBE_COOKIES_TEXT in Railway, or add cookies.txt and redeploy."
         )
 
     bot_token = _get_bot_token()
