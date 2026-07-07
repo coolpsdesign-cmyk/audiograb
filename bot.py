@@ -235,7 +235,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         filename=mp3_path.name,
                         title=video_title,
                         thumbnail=thumb_file,
-                        caption="sent successfully ✅",
+                        caption=(     "✅ Your MP3 is ready!
+
+"     "📥 Send another YouTube video or Shorts URL to download more audio." )
                     )
             else:
                 await update.message.reply_audio(
