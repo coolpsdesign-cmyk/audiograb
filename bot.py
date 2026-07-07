@@ -18,19 +18,10 @@ import threading
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Optional
-
-try:
-    from dotenv import load_dotenv
-    _root = Path(__file__).parent
-    load_dotenv(_root / ".env")
-    load_dotenv(_root / "secrets.env")
-except ImportError:
-    pass
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 import yt_dlp
-from telegram import Update, ReplyKeyboardMarkup
+from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
 logging.basicConfig(
@@ -40,38 +31,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-keyboard=[["🎵 Convert Audio"],["❓ Help","ℹ️ About"]]
-MAIN_KEYBOARD=ReplyKeyboardMarkup(keyboard,resize_keyboard=True,is_persistent=True)
-
-
-
-def _get_bot_token() -> Optional[str]:
-    token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    if token:
-        return token.strip()
-
-    try:
-        from dotenv import load_dotenv
-        root = Path(__file__).parent
-        load_dotenv(root / ".env")
-        load_dotenv(root / "secrets.env")
-        token = os.environ.get("TELEGRAM_BOT_TOKEN")
-        if token:
-            return token.strip()
-    except ImportError:
-        pass
-
-    for name in (".env", "secrets.env"):
-        path = Path(__file__).parent / name
-        if not path.exists():
-            continue
-        for line in path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if line.startswith("TELEGRAM_BOT_TOKEN="):
-                return line.split("=", 1)[1].strip().strip('"').strip("'")
-    return None
-
-
 DOWNLOAD_DIR = Path(__file__).parent / "downloads"
 DOWNLOAD_DIR.mkdir(exist_ok=True)
 
@@ -85,40 +44,10 @@ YOUTUBE_REGEX = re.compile(
 MAX_FILESIZE_MB = 50
 
 
-def _resolve_cookie_file() -> Optional[Path]:
-    """
-    Return a writable cookies file path for yt-dlp, or None if unavailable.
-    Supports Railway-style YOUTUBE_COOKIES_TEXT (paste full cookies.txt content).
-    """
-    cookies_text = os.environ.get("YOUTUBE_COOKIES_TEXT", "").strip()
-    if cookies_text:
-        writable_cookie_path = Path("/tmp/cookies.txt")
-        writable_cookie_path.write_text(cookies_text + "\n", encoding="utf-8")
-        logger.info("Using YouTube cookies from YOUTUBE_COOKIES_TEXT (%d bytes)", len(cookies_text))
-        return writable_cookie_path
-
-    cookie_candidates = []
-    env_cookie = os.environ.get("YOUTUBE_COOKIES_PATH")
-    if env_cookie:
-        cookie_candidates.append(Path(env_cookie))
-    cookie_candidates.append(Path(__file__).parent / "cookies.txt")
-    cookie_candidates.append(Path("/etc/secrets/cookies.txt"))
-
-    secret_cookie_path = next((p for p in cookie_candidates if p.exists()), None)
-    if secret_cookie_path is None:
-        return None
-
-    writable_cookie_path = Path("/tmp/cookies.txt")
-    shutil.copyfile(str(secret_cookie_path), writable_cookie_path)
-    logger.info("Using YouTube cookies from %s", secret_cookie_path)
-    return writable_cookie_path
-
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🎵 *Welcome to GRAB AUDIO!*\n\nChoose an option or send a YouTube link.",
-        parse_mode="Markdown",
-        reply_markup=MAIN_KEYBOARD
+        "👋 Send me a YouTube video or Shorts link and I'll reply with the audio as an MP3.\n\n"
+        "Use /help for more info."
     )
 
 
@@ -163,9 +92,14 @@ def download_audio(url: str, out_dir: Path):
         },
     }
 
-    cookie_file = _resolve_cookie_file()
-    if cookie_file is not None:
-        ydl_opts["cookiefile"] = str(cookie_file)
+    # If a cookies file has been provided (e.g. via Render's Secret Files),
+    # copy it to a writable location first — Render's /etc/secrets/ is
+    # read-only, but yt-dlp needs to write back to the cookie jar.
+    secret_cookie_path = os.environ.get("YOUTUBE_COOKIES_PATH", "/etc/secrets/cookies.txt")
+    if os.path.exists(secret_cookie_path):
+        writable_cookie_path = Path("/tmp/cookies.txt")
+        shutil.copyfile(secret_cookie_path, writable_cookie_path)
+        ydl_opts["cookiefile"] = str(writable_cookie_path)
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
@@ -262,15 +196,6 @@ def _embed_square_thumbnail(mp3_path: Path, thumbnail_path: Path) -> Path:
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text or ""
-
-    if text=="🎵 Convert Audio":
-        m=await update.message.reply_text("📥 Please send me a YouTube video or Shorts URL.",reply_markup=MAIN_KEYBOARD)
-        context.user_data["prompt_message_id"]=m.message_id
-        return
-    elif text=="❓ Help":
-        await help_command(update,context); return
-    elif text=="ℹ️ About":
-        await update.message.reply_text("🎵 GRAB AUDIO\nConvert YouTube videos into MP3.",reply_markup=MAIN_KEYBOARD); return
     match = YOUTUBE_REGEX.search(text)
 
     if not match:
@@ -327,34 +252,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
-        pid=context.user_data.pop("prompt_message_id",None)
-        if pid:
-            try:
-                await context.bot.delete_message(update.effective_chat.id,pid)
-            except Exception:
-                pass
-        await update.message.reply_text("✅ Ready for another conversion!",reply_markup=MAIN_KEYBOARD)
-
         # Also delete the person's original YouTube link message, per request.
         try:
             await update.message.delete()
         except Exception:
             logger.warning("Could not delete the original link message.", exc_info=True)
 
-    except yt_dlp.utils.DownloadError as e:
+    except yt_dlp.utils.DownloadError:
         logger.exception("yt-dlp failed to download %s", url)
-        err = str(e).lower()
-        if "sign in" in err or "bot" in err or "confirm" in err:
-            await status_msg.edit_text(
-                "❌ YouTube blocked this server (cloud IP). "
-                "Add a cookies.txt file to the bot and redeploy — "
-                "or run the bot on Termux/home instead of Discloud."
-            )
-        else:
-            await status_msg.edit_text(
-                "❌ Couldn't download that video. It may be private, age-restricted, "
-                "region-locked, or the link is invalid."
-            )
+        await status_msg.edit_text(
+            "❌ Couldn't download that video. It may be private, age-restricted, "
+            "region-locked, or the link is invalid."
+        )
     except Exception as e:
         logger.exception("Unexpected error while processing %s", url)
         await status_msg.edit_text(f"❌ Something went wrong: {e}")
@@ -390,52 +299,38 @@ class _PingHandler(BaseHTTPRequestHandler):
 
 
 def _start_keepalive_server():
-    # Only needed on Render-style hosts. Discloud bots do not need this.
-    if not os.environ.get("ENABLE_KEEPALIVE"):
-        return
-    try:
-        port = int(os.environ.get("PORT", 10000))
-        server = HTTPServer(("0.0.0.0", port), _PingHandler)
-        logger.info("Keep-alive web server listening on port %s", port)
-        server.serve_forever()
-    except Exception:
-        logger.warning("Keep-alive server failed to start.", exc_info=True)
+    port = int(os.environ.get("PORT", 10000))  # Render sets PORT automatically
+    server = HTTPServer(("0.0.0.0", port), _PingHandler)
+    logger.info("Keep-alive web server listening on port %s", port)
+    server.serve_forever()
 
 
 def main():
-    logger.info("Starting bot from %s", Path(__file__).resolve())
-    logger.info("Files here: %s", [p.name for p in Path(__file__).parent.iterdir()])
-
+    # Run a tiny web server in the background so Render treats this as a
+    # web service (required for the free tier) and so an uptime-pinger
+    # can hit it periodically to prevent the free instance from sleeping.
     threading.Thread(target=_start_keepalive_server, daemon=True).start()
 
-    cookie_file = _resolve_cookie_file()
-    if cookie_file is not None:
-        size = cookie_file.stat().st_size
-        logger.info("Cookie file ready at %s (%d bytes)", cookie_file, size)
+    secret_cookie_path = os.environ.get("YOUTUBE_COOKIES_PATH", "/etc/secrets/cookies.txt")
+    if os.path.exists(secret_cookie_path):
+        size = os.path.getsize(secret_cookie_path)
+        logger.info("Cookie file FOUND at %s (%d bytes)", secret_cookie_path, size)
     else:
-        logger.warning(
-            "Cookie file NOT FOUND — YouTube will likely block downloads on cloud hosts. "
-            "Set YOUTUBE_COOKIES_TEXT in Railway, or add cookies.txt and redeploy."
-        )
+        logger.warning("Cookie file NOT FOUND at %s", secret_cookie_path)
 
-    bot_token = _get_bot_token()
-    if not bot_token:
+    if not BOT_TOKEN:
         raise RuntimeError(
             "TELEGRAM_BOT_TOKEN environment variable is not set. "
             "Get a token from @BotFather on Telegram and set it before running."
         )
 
-    app = Application.builder().token(bot_token).build()
+    app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(error_handler)
 
     logger.info("Bot is starting (polling mode)...")
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        asyncio.set_event_loop(asyncio.new_event_loop())
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
