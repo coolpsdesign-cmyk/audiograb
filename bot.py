@@ -231,21 +231,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if thumbnail_path and thumbnail_path.exists():
                 with open(thumbnail_path, "rb") as thumb_file:
                     await update.message.reply_audio(
-                        audio=audio_file,
-                        filename=mp3_path.name,
-                        title=video_title,
-                        thumbnail=thumb_file,
-                        caption=(     "✅ Your MP3 is ready!
-
-"     "📥 Send another YouTube video or Shorts URL to download more audio." )
-                    )
+    audio=audio_file,
+    filename=mp3_path.name,
+    title=video_title,
+    thumbnail=thumb_file,
+    caption=(
+        "sent successfully ✅\n\n"
+        "📥 Send another YouTube video or Shorts URL to download more audio."
+    ),
+)
             else:
                 await update.message.reply_audio(
-                    audio=audio_file,
-                    filename=mp3_path.name,
-                    title=video_title,
-                    caption="sent successfully ✅",
-                )
+    audio=audio_file,
+    filename=mp3_path.name,
+    title=video_title,
+    caption=(
+        "sent successfully ✅\n\n"
+        "📥 Send another YouTube video or Shorts URL to download more audio."
+    ),
+)
 
         # Clean up the "Downloading..." / "Done!" status message now that
         # the actual audio message has been delivered.
